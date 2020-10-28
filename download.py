@@ -1,7 +1,7 @@
 from pytube import YouTube
 from retrying import retry
 
-url = ['myVideos']
+url = ['']
 
 
 def main():
