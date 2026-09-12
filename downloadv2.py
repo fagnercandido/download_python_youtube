@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from mutagen.id3 import APIC, ID3, TALB
+from mutagen.id3 import APIC, ID3, TALB, TDRC, TIT2, TPE1, TPE2, TRCK
 from mutagen.mp3 import MP3
 from pytubefix import Playlist
 from retrying import retry
@@ -240,6 +240,72 @@ def find_cover_for_folder(album_dir: Path) -> bytes | None:
     return None
 
 
+def set_track_tags(mp3_path: Path, title: str, artist: str | None, album: str | None,
+                   albumartist: str | None, track: str | None, year: str | None) -> bool:
+    try:
+        audio = MP3(mp3_path, ID3=ID3)
+        if audio.tags is None:
+            audio.add_tags()
+        t = audio.tags
+        t.setall('TIT2', [TIT2(encoding=3, text=title)])
+        if artist:
+            t.setall('TPE1', [TPE1(encoding=3, text=artist)])
+        if album:
+            t.setall('TALB', [TALB(encoding=3, text=album)])
+        if albumartist:
+            t.setall('TPE2', [TPE2(encoding=3, text=albumartist)])
+        if track:
+            t.setall('TRCK', [TRCK(encoding=3, text=track)])
+        if year:
+            t.setall('TDRC', [TDRC(encoding=3, text=str(year))])
+        audio.save(v2_version=3)
+        return True
+    except Exception as e:
+        print(f'  [aviso] tags não gravadas em {mp3_path.name}: {e}')
+        return False
+
+
+def enrich_downloaded_albums() -> None:
+    """Reescreve tags limpas (título, faixa#, artista, álbum, ano) nos álbuns
+    de ALBUM_URLS usando a ytmusicapi. Não toca em pastas de outras origens."""
+    print(f'\n=== enriquecendo metadados: {len(ALBUM_URLS)} álbuns ===')
+    for url in ALBUM_URLS:
+        parsed = urlparse(url)
+        if 'playlist' not in (parsed.path or ''):
+            continue
+        playlist_id = parse_qs(parsed.query).get('list', [''])[0]
+        try:
+            album = ytmusic.get_album(ytmusic.get_album_browse_id(playlist_id))
+        except Exception as e:
+            print(f'  [aviso] resolução falhou {url}: {e}')
+            continue
+
+        name = _album_name(album)
+        album_dir = BASE_DIR / sanitize(name)
+        if not album_dir.exists():
+            continue
+
+        album_title = album.get('title')
+        album_artist = album['artists'][0]['name'] if album.get('artists') else None
+        year = album.get('year')
+        tracks = album.get('tracks', [])
+        total = len(tracks)
+
+        done = 0
+        for i, tr in enumerate(tracks, 1):
+            title = tr.get('title')
+            if not title:
+                continue
+            f = album_dir / f'{sanitize(title)}.mp3'
+            if not f.exists():
+                continue
+            artists = ', '.join(a['name'] for a in (tr.get('artists') or []) if a.get('name')) or album_artist
+            trackno = tr.get('trackNumber') or i
+            if set_track_tags(f, title, artists, album_title, album_artist, f'{trackno}/{total}', year):
+                done += 1
+        print(f'  [ok] {name}: {done}/{total} faixas')
+
+
 def repair_metadata() -> None:
     """Garante capa embutida + cover.jpg em toda pasta e o campo álbum em toda faixa."""
     if not BASE_DIR.exists():
@@ -349,6 +415,7 @@ async def main_async() -> None:
         await download_album(url)
     print('\n✓ downloads concluídos')
 
+    enrich_downloaded_albums()
     repair_metadata()
     print('\n✓ concluído')
 
