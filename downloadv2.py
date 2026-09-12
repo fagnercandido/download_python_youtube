@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from mutagen.id3 import APIC, ID3
+from mutagen.id3 import APIC, ID3, TALB
 from mutagen.mp3 import MP3
 from pytubefix import Playlist
 from retrying import retry
@@ -186,6 +186,28 @@ def _extract_embedded_cover(mp3_path: Path) -> bytes | None:
         return None
 
 
+def _mp3_has_album(mp3_path: Path) -> bool:
+    try:
+        audio = MP3(mp3_path, ID3=ID3)
+        return bool(audio.tags and audio.tags.getall('TALB')
+                    and str(audio.tags.getall('TALB')[0]).strip())
+    except Exception:
+        return False
+
+
+def set_album_tag(mp3_path: Path, album: str) -> bool:
+    try:
+        audio = MP3(mp3_path, ID3=ID3)
+        if audio.tags is None:
+            audio.add_tags()
+        audio.tags.setall('TALB', [TALB(encoding=3, text=album)])
+        audio.save(v2_version=3)
+        return True
+    except Exception as e:
+        print(f'  [aviso] álbum não gravado em {mp3_path.name}: {e}')
+        return False
+
+
 def find_cover_for_folder(album_dir: Path) -> bytes | None:
     """Descobre a capa de uma pasta 'Artista - Álbum': cover.jpg > capa já
     embutida numa faixa > busca no YouTube Music. Sempre salva cover.jpg."""
@@ -218,29 +240,36 @@ def find_cover_for_folder(album_dir: Path) -> bytes | None:
     return None
 
 
-def repair_covers() -> None:
-    """Garante que toda pasta tenha cover.jpg e que toda faixa tenha capa embutida."""
+def repair_metadata() -> None:
+    """Garante capa embutida + cover.jpg em toda pasta e o campo álbum em toda faixa."""
     if not BASE_DIR.exists():
         return
     folders = sorted(p for p in BASE_DIR.iterdir()
                      if p.is_dir() and not p.name.startswith('__') and any(p.glob('*.mp3')))
 
-    print(f'\n=== reparo de capas: {len(folders)} pasta(s) ===')
+    print(f'\n=== reparo de metadados: {len(folders)} pasta(s) ===')
     sem_capa = []
     for album_dir in folders:
         mp3s = sorted(album_dir.glob('*.mp3'))
-        missing = [m for m in mp3s if not _mp3_has_cover(m)]
-        has_cover_jpg = (album_dir / 'cover.jpg').exists()
-        if not missing and has_cover_jpg:
-            continue
+        # nome do álbum = parte após 'Artista - ' (ou a pasta inteira)
+        album_title = album_dir.name.split(' - ', 1)[1] if ' - ' in album_dir.name else album_dir.name
 
-        cover = find_cover_for_folder(album_dir)
-        if not cover:
-            sem_capa.append(album_dir.name)
-            print(f'  [SEM CAPA] {album_dir.name} ({len(missing)} faixas sem capa)')
-            continue
-        added = sum(embed_cover(m, cover) for m in missing)
-        print(f'  [ok] {album_dir.name}: +{added} faixa(s), cover.jpg garantido')
+        sem_album = [m for m in mp3s if not _mp3_has_album(m)]
+        album_added = sum(set_album_tag(m, album_title) for m in sem_album)
+
+        sem_capa_faixas = [m for m in mp3s if not _mp3_has_cover(m)]
+        has_cover_jpg = (album_dir / 'cover.jpg').exists()
+        cover_added = 0
+        if sem_capa_faixas or not has_cover_jpg:
+            cover = find_cover_for_folder(album_dir)
+            if not cover:
+                sem_capa.append(album_dir.name)
+                print(f'  [SEM CAPA] {album_dir.name} ({len(sem_capa_faixas)} faixas sem capa)')
+                continue
+            cover_added = sum(embed_cover(m, cover) for m in sem_capa_faixas)
+
+        if album_added or cover_added:
+            print(f'  [ok] {album_dir.name}: +{cover_added} capa(s), +{album_added} álbum(ns)')
 
     if sem_capa:
         print(f'\n⚠ {len(sem_capa)} pasta(s) sem capa encontrada (resolver manual):')
@@ -320,7 +349,7 @@ async def main_async() -> None:
         await download_album(url)
     print('\n✓ downloads concluídos')
 
-    repair_covers()
+    repair_metadata()
     print('\n✓ concluído')
 
 
